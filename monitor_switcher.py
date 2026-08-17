@@ -1,0 +1,270 @@
+#!/usr/bin/env python3
+"""
+Monitor Switcher
+================
+Turns a chosen group of monitors on/off in one shot (via kscreen-doctor),
+without opening KDE's Display Configuration window.
+
+Usage:
+    monitor_switcher.py            -> show the tray icon (normal mode)
+    monitor_switcher.py --toggle   -> toggle the selected group and exit
+                                       (used by the global keyboard shortcut)
+    monitor_switcher.py --list     -> print detected monitors (debug)
+
+Which monitors belong to the group is stored in:
+    ~/.config/monitor-switcher/config.json
+and can be changed from the tray icon's menu (right click).
+"""
+from __future__ import annotations
+
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+CONFIG_DIR = Path.home() / ".config" / "monitor-switcher"
+CONFIG_FILE = CONFIG_DIR / "config.json"
+
+# Default selection on first run: the two work monitors (middle = DP-1
+# "Hailstorm", right = DP-2 "LF24T450F"). The left one (HDMI-A-1, personal
+# use) is left out by default. Changeable from the tray menu.
+DEFAULT_SELECTED = ["DP-1", "DP-2"]
+
+
+# --------------------------------------------------------------------------
+# kscreen-doctor helpers
+# --------------------------------------------------------------------------
+
+def get_outputs() -> list[dict]:
+    """Return the list of connected outputs via `kscreen-doctor -j`."""
+    try:
+        out = subprocess.run(
+            ["kscreen-doctor", "-j"], capture_output=True, text=True, check=True
+        )
+        data = json.loads(out.stdout)
+    except (subprocess.CalledProcessError, FileNotFoundError, json.JSONDecodeError) as e:
+        print(f"Error querying kscreen-doctor: {e}", file=sys.stderr)
+        return []
+    return [o for o in data.get("outputs", []) if o.get("connected")]
+
+
+_edid_cache: dict[str, str] = {}
+
+
+def friendly_name(output_name: str) -> str:
+    """Try to get the monitor's commercial name (via EDID); falls back to
+    the connector name (e.g. 'DP-1') if that fails."""
+    if output_name in _edid_cache:
+        return _edid_cache[output_name]
+
+    result = output_name
+    for edid_path in Path("/sys/class/drm").glob(f"card*-{output_name}/edid"):
+        try:
+            raw = edid_path.read_bytes()
+            if not raw:
+                continue
+            decoded = subprocess.run(
+                ["edid-decode"], input=raw, capture_output=True, timeout=5
+            ).stdout.decode(errors="ignore")
+            m = re.search(r"Display Product Name:\s*'([^']+)'", decoded)
+            if m:
+                result = m.group(1)
+                break
+        except (OSError, subprocess.SubprocessError):
+            continue
+
+    _edid_cache[output_name] = result
+    return result
+
+
+def apply_kscreen(commands: list[str]) -> bool:
+    """Run a list of commands like 'output.DP-1.disable' in a single
+    kscreen-doctor call."""
+    if not commands:
+        return True
+    try:
+        subprocess.run(["kscreen-doctor", *commands], check=True, capture_output=True)
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        print(f"Error applying changes: {e}", file=sys.stderr)
+        return False
+
+
+# --------------------------------------------------------------------------
+# Config
+# --------------------------------------------------------------------------
+
+def load_selected() -> list[str]:
+    try:
+        data = json.loads(CONFIG_FILE.read_text())
+        sel = data.get("selected")
+        if isinstance(sel, list):
+            return sel
+    except (OSError, json.JSONDecodeError):
+        pass
+    return list(DEFAULT_SELECTED)
+
+
+def save_selected(selected: list[str]) -> None:
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    CONFIG_FILE.write_text(json.dumps({"selected": selected}, ensure_ascii=False, indent=2))
+
+
+# --------------------------------------------------------------------------
+# Toggle logic (shared between CLI mode and tray mode)
+# --------------------------------------------------------------------------
+
+def toggle_group(names: list[str]) -> tuple[bool, str]:
+    """Turn a group of outputs on/off together. If any of them is enabled,
+    disable them all; otherwise enable them all. Returns (success, message)."""
+    outputs = get_outputs()
+    by_name = {o["name"]: o for o in outputs}
+
+    present = [n for n in names if n in by_name]
+    if not present:
+        return False, "None of the selected monitors is currently connected."
+
+    group_enabled = any(by_name[n]["enabled"] for n in present)
+    action = "disable" if group_enabled else "enable"
+
+    # Safety: never leave the whole system with zero enabled monitors.
+    if action == "disable":
+        remaining_on = sum(
+            1 for o in outputs if o["name"] not in present and o["enabled"]
+        )
+        if remaining_on == 0:
+            return False, "Cancelled: this would turn off every monitor."
+
+    commands = [f"output.{n}.{action}" for n in present]
+    ok = apply_kscreen(commands)
+    verb = "turned off" if action == "disable" else "turned on"
+    names_str = ", ".join(friendly_name(n) for n in present)
+    if ok:
+        return True, f"Monitors {verb}: {names_str}"
+    return False, f"Failed to apply changes to: {names_str}"
+
+
+# --------------------------------------------------------------------------
+# CLI mode (used by the global keyboard shortcut, no GUI)
+# --------------------------------------------------------------------------
+
+def notify(title: str, message: str) -> None:
+    try:
+        subprocess.run(["notify-send", "-a", "Monitor Switcher", title, message], check=False)
+    except FileNotFoundError:
+        pass
+
+
+def cli_toggle() -> int:
+    selected = load_selected()
+    ok, msg = toggle_group(selected)
+    notify("Monitor Switcher", msg)
+    print(msg)
+    return 0 if ok else 1
+
+
+def cli_list() -> int:
+    for o in get_outputs():
+        state = "on" if o["enabled"] else "off"
+        print(f"{o['name']:10s} {friendly_name(o['name']):20s} {state}")
+    return 0
+
+
+# --------------------------------------------------------------------------
+# Tray mode (GUI)
+# --------------------------------------------------------------------------
+
+def run_tray() -> int:
+    from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu
+    from PyQt6.QtGui import QIcon, QAction
+
+    app = QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(False)
+
+    icon = QIcon.fromTheme("preferences-desktop-display-randr")
+    tray = QSystemTrayIcon(icon, app)
+    tray.setToolTip("Monitor Switcher")
+
+    menu = QMenu()
+    selected = set(load_selected())
+    monitor_actions: dict[str, QAction] = {}
+
+    def rebuild_menu():
+        menu.clear()
+        monitor_actions.clear()
+        outputs = get_outputs()
+
+        header = menu.addAction("Monitors in the group (click to toggle):")
+        header.setEnabled(False)
+
+        for o in outputs:
+            name = o["name"]
+            label = friendly_name(name)
+            state = "on" if o["enabled"] else "off"
+            act = QAction(f"{label} ({state})", menu, checkable=True)
+            act.setChecked(name in selected)
+            act.toggled.connect(lambda checked, n=name: on_monitor_toggled(n, checked))
+            menu.addAction(act)
+            monitor_actions[name] = act
+
+        menu.addSeparator()
+        toggle_action = menu.addAction("Toggle selected now")
+        toggle_action.triggered.connect(do_toggle)
+
+        menu.addSeparator()
+        refresh_action = menu.addAction("Refresh monitor list")
+        refresh_action.triggered.connect(rebuild_menu)
+
+        menu.addSeparator()
+        quit_action = menu.addAction("Quit")
+        quit_action.triggered.connect(app.quit)
+
+        update_tooltip(outputs)
+
+    def on_monitor_toggled(name: str, checked: bool):
+        if checked:
+            selected.add(name)
+        else:
+            selected.discard(name)
+        save_selected(sorted(selected))
+
+    def update_tooltip(outputs=None):
+        outputs = outputs if outputs is not None else get_outputs()
+        by_name = {o["name"]: o for o in outputs}
+        present = [n for n in selected if n in by_name]
+        if not present:
+            tray.setToolTip("Monitor Switcher — no monitor selected")
+            return
+        state = "on" if any(by_name[n]["enabled"] for n in present) else "off"
+        names_str = ", ".join(friendly_name(n) for n in present)
+        tray.setToolTip(f"Monitor Switcher\n{names_str}: {state}")
+
+    def do_toggle():
+        ok, msg = toggle_group(sorted(selected))
+        tray.showMessage("Monitor Switcher", msg, icon, 3000)
+        rebuild_menu()
+
+    tray.setContextMenu(menu)
+    rebuild_menu()
+
+    def on_activated(reason):
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:
+            do_toggle()
+
+    tray.activated.connect(on_activated)
+    tray.show()
+
+    return app.exec()
+
+
+def main() -> int:
+    if "--toggle" in sys.argv:
+        return cli_toggle()
+    if "--list" in sys.argv:
+        return cli_list()
+    return run_tray()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
