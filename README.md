@@ -33,6 +33,13 @@ the tray menu; no need to touch the code. KWin tends to reshuffle output
 priorities when outputs are disabled/re-enabled, so the saved primary is
 re-applied on every toggle to keep it from drifting.
 
+kscreen/KWin also refuses a layout with a gap between screens, which
+happens if you disable a monitor sitting between two others. To avoid
+that, the app snapshots the current arrangement (`layout` in the config
+file) whenever every monitor is enabled, slides the remaining ones
+together to close the gap when one turns off, and moves everything back
+to its saved spot when it turns back on.
+
 The `DEFAULT_SELECTED` / `DEFAULT_PRIMARY` constants at the top of
 `monitor_switcher.py` only seed the very first run (using whatever
 connector names `kscreen-doctor -o` reports on your machine, e.g.

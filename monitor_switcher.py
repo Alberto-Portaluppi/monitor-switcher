@@ -109,6 +109,33 @@ def priority_commands(outputs: list[dict], primary_name: str) -> list[str]:
     return [f"output.{n}.priority.{i + 1}" for i, n in enumerate(ordered)]
 
 
+def compact_positions(remaining: list[dict]) -> list[str]:
+    """kscreen/KWin refuses a layout with gaps between screens ("Spaces
+    between screens are not supported"). When an output in the middle of
+    the row gets disabled, slide whatever stays enabled so it keeps
+    touching, left to right, without moving the leftmost one."""
+    ordered = sorted(remaining, key=lambda o: o["pos"]["x"])
+    commands = []
+    cursor_x = ordered[0]["pos"]["x"] if ordered else 0
+    for o in ordered:
+        if o["pos"]["x"] != cursor_x:
+            commands.append(f"output.{o['name']}.position.{cursor_x},{o['pos']['y']}")
+        cursor_x += o["size"]["width"]
+    return commands
+
+
+def restore_positions(outputs: list[dict]) -> list[str]:
+    """Move every output that has a saved position back to where it was
+    the last time all monitors were enabled together."""
+    layout = load_layout()
+    commands = []
+    for o in outputs:
+        pos = layout.get(o["name"])
+        if pos:
+            commands.append(f"output.{o['name']}.position.{pos['x']},{pos['y']}")
+    return commands
+
+
 # --------------------------------------------------------------------------
 # Config
 # --------------------------------------------------------------------------
@@ -150,6 +177,17 @@ def save_primary(name: str) -> None:
     save_config(data)
 
 
+def load_layout() -> dict:
+    layout = load_config().get("layout")
+    return layout if isinstance(layout, dict) else {}
+
+
+def save_layout(layout: dict) -> None:
+    data = load_config()
+    data["layout"] = layout
+    save_config(data)
+
+
 # --------------------------------------------------------------------------
 # Toggle logic (shared between CLI mode and tray mode)
 # --------------------------------------------------------------------------
@@ -167,15 +205,24 @@ def toggle_group(names: list[str]) -> tuple[bool, str]:
     group_enabled = any(by_name[n]["enabled"] for n in present)
     action = "disable" if group_enabled else "enable"
 
-    # Safety: never leave the whole system with zero enabled monitors.
-    if action == "disable":
-        remaining_on = sum(
-            1 for o in outputs if o["name"] not in present and o["enabled"]
-        )
-        if remaining_on == 0:
-            return False, "Cancelled: this would turn off every monitor."
-
     commands = [f"output.{n}.{action}" for n in present]
+
+    if action == "disable":
+        remaining_on = [o for o in outputs if o["name"] not in present and o["enabled"]]
+        # Safety: never leave the whole system with zero enabled monitors.
+        if not remaining_on:
+            return False, "Cancelled: this would turn off every monitor."
+        # Snapshot the arrangement while it still has everyone in it, so it
+        # can be restored later -- only while it's a "complete" layout.
+        if all(o["enabled"] for o in outputs):
+            save_layout({o["name"]: o["pos"] for o in outputs})
+        # Close the gap the disabled output(s) would otherwise leave behind.
+        commands += compact_positions(remaining_on)
+    else:
+        # Put everyone (the ones coming back and the ones that were
+        # shifted to compact the gap) back where they started.
+        commands += restore_positions(outputs)
+
     # Re-assert the primary monitor (and a stable priority order for the
     # rest) in the same atomic call, since KWin tends to reshuffle
     # priorities when outputs are disabled/enabled.
