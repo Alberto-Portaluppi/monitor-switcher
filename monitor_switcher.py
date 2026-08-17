@@ -31,6 +31,11 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 # use) is left out by default. Changeable from the tray menu.
 DEFAULT_SELECTED = ["DP-1", "DP-2"]
 
+# Which output should always be the primary (priority 1) monitor. KWin
+# tends to reshuffle output priorities when outputs are disabled/enabled,
+# so this gets re-applied on every toggle. Changeable from the tray menu.
+DEFAULT_PRIMARY = "DP-1"
+
 
 # --------------------------------------------------------------------------
 # kscreen-doctor helpers
@@ -91,24 +96,58 @@ def apply_kscreen(commands: list[str]) -> bool:
         return False
 
 
+def priority_commands(outputs: list[dict], primary_name: str) -> list[str]:
+    """Build 'output.<name>.priority.<n>' commands that put `primary_name`
+    at priority 1 (primary) and every other connected output right after
+    it, in a stable order. Re-applying this on every toggle is what keeps
+    the primary monitor from drifting when outputs get disabled/enabled."""
+    names = {o["name"] for o in outputs}
+    if primary_name not in names:
+        return []
+    rest = sorted((o for o in outputs if o["name"] != primary_name), key=lambda o: o["id"])
+    ordered = [primary_name] + [o["name"] for o in rest]
+    return [f"output.{n}.priority.{i + 1}" for i, n in enumerate(ordered)]
+
+
 # --------------------------------------------------------------------------
 # Config
 # --------------------------------------------------------------------------
 
-def load_selected() -> list[str]:
+def load_config() -> dict:
     try:
         data = json.loads(CONFIG_FILE.read_text())
-        sel = data.get("selected")
-        if isinstance(sel, list):
-            return sel
     except (OSError, json.JSONDecodeError):
-        pass
-    return list(DEFAULT_SELECTED)
+        data = {}
+    if not isinstance(data.get("selected"), list):
+        data["selected"] = list(DEFAULT_SELECTED)
+    if not isinstance(data.get("primary"), str):
+        data["primary"] = DEFAULT_PRIMARY
+    return data
+
+
+def save_config(data: dict) -> None:
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    CONFIG_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+
+
+def load_selected() -> list[str]:
+    return load_config()["selected"]
 
 
 def save_selected(selected: list[str]) -> None:
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    CONFIG_FILE.write_text(json.dumps({"selected": selected}, ensure_ascii=False, indent=2))
+    data = load_config()
+    data["selected"] = selected
+    save_config(data)
+
+
+def load_primary() -> str:
+    return load_config()["primary"]
+
+
+def save_primary(name: str) -> None:
+    data = load_config()
+    data["primary"] = name
+    save_config(data)
 
 
 # --------------------------------------------------------------------------
@@ -137,6 +176,10 @@ def toggle_group(names: list[str]) -> tuple[bool, str]:
             return False, "Cancelled: this would turn off every monitor."
 
     commands = [f"output.{n}.{action}" for n in present]
+    # Re-assert the primary monitor (and a stable priority order for the
+    # rest) in the same atomic call, since KWin tends to reshuffle
+    # priorities when outputs are disabled/enabled.
+    commands += priority_commands(outputs, load_primary())
     ok = apply_kscreen(commands)
     verb = "turned off" if action == "disable" else "turned on"
     names_str = ", ".join(friendly_name(n) for n in present)
@@ -165,9 +208,11 @@ def cli_toggle() -> int:
 
 
 def cli_list() -> int:
+    primary = load_primary()
     for o in get_outputs():
         state = "on" if o["enabled"] else "off"
-        print(f"{o['name']:10s} {friendly_name(o['name']):20s} {state}")
+        tag = " (primary)" if o["name"] == primary else ""
+        print(f"{o['name']:10s} {friendly_name(o['name']):20s} {state}{tag}")
     return 0
 
 
@@ -177,7 +222,7 @@ def cli_list() -> int:
 
 def run_tray() -> int:
     from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu
-    from PyQt6.QtGui import QIcon, QAction
+    from PyQt6.QtGui import QIcon, QAction, QActionGroup
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
@@ -188,6 +233,7 @@ def run_tray() -> int:
 
     menu = QMenu()
     selected = set(load_selected())
+    primary = load_primary()
     monitor_actions: dict[str, QAction] = {}
 
     def rebuild_menu():
@@ -202,7 +248,8 @@ def run_tray() -> int:
             name = o["name"]
             label = friendly_name(name)
             state = "on" if o["enabled"] else "off"
-            act = QAction(f"{label} ({state})", menu, checkable=True)
+            star = " ★" if name == primary else ""
+            act = QAction(f"{label} ({state}){star}", menu, checkable=True)
             act.setChecked(name in selected)
             act.toggled.connect(lambda checked, n=name: on_monitor_toggled(n, checked))
             menu.addAction(act)
@@ -211,6 +258,18 @@ def run_tray() -> int:
         menu.addSeparator()
         toggle_action = menu.addAction("Toggle selected now")
         toggle_action.triggered.connect(do_toggle)
+
+        menu.addSeparator()
+        primary_menu = menu.addMenu("Primary monitor (★)")
+        primary_group = QActionGroup(primary_menu)
+        primary_group.setExclusive(True)
+        for o in outputs:
+            name = o["name"]
+            act = QAction(friendly_name(name), primary_menu, checkable=True)
+            act.setChecked(name == primary)
+            act.triggered.connect(lambda checked, n=name: on_primary_changed(n))
+            primary_group.addAction(act)
+            primary_menu.addAction(act)
 
         menu.addSeparator()
         refresh_action = menu.addAction("Refresh monitor list")
@@ -228,6 +287,13 @@ def run_tray() -> int:
         else:
             selected.discard(name)
         save_selected(sorted(selected))
+
+    def on_primary_changed(name: str):
+        nonlocal primary
+        primary = name
+        save_primary(name)
+        apply_kscreen(priority_commands(get_outputs(), name))
+        rebuild_menu()
 
     def update_tooltip(outputs=None):
         outputs = outputs if outputs is not None else get_outputs()

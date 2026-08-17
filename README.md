@@ -35,8 +35,11 @@ those screens.
   state of every monitor; `--toggle` does the same thing as the shortcut,
   headless.
 
-Which monitors belong to the group is saved in
-`~/.config/monitor-switcher/config.json`.
+Which monitors belong to the group — and which one is the primary monitor
+(marked with ★ in the tray menu, under "Primary monitor") — is saved in
+`~/.config/monitor-switcher/config.json`. KWin tends to reshuffle output
+priorities when outputs are disabled/re-enabled, so the saved primary is
+re-applied on every toggle to keep it from drifting.
 
 ## Run manually / debug
 
