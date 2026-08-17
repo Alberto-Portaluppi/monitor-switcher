@@ -3,29 +3,20 @@
 A KDE Plasma tray icon to turn a group of monitors on/off together (via
 `kscreen-doctor`), without opening the Display Configuration window.
 
-Built for a 3-monitor Kubuntu/Wayland setup where two monitors have a
-second HDMI input shared with a laptop:
-
-| Connector | Model      | Position | In default group? |
-|-----------|------------|----------|--------------------|
-| HDMI-A-1  | S22F350    | left     | no (personal)      |
-| DP-1      | Hailstorm  | middle   | yes (work)         |
-| DP-2      | LF24T450F  | right    | yes (work)         |
-
-## Why
-
-The middle and right monitors each have two inputs: one from the desktop
-PC, one from a laptop. When working from the laptop, disabling those two
-outputs on the desktop PC's side stops its mouse/focus from leaking onto
-those screens.
+Works with any number of monitors on any Plasma/Wayland setup — outputs
+and their names are detected at runtime via `kscreen-doctor`, nothing is
+hardcoded to a specific model or GPU. One example use case: monitors with
+two video inputs (e.g. shared between a desktop and a laptop) where you
+want to disable the desktop's outputs while working from the laptop, so
+its mouse/focus doesn't leak onto those screens.
 
 ## Usage
 
 - **Tray icon**: starts automatically on login (`~/.config/autostart/`).
   **Left click**: toggle the selected group on/off.
   **Right click**: menu to check/uncheck which monitors belong to the
-  group, force a toggle, refresh the list (after plugging/unplugging
-  something), or quit.
+  group, pick the primary monitor, force a toggle, refresh the list
+  (after plugging/unplugging something), or quit.
 - **Keyboard shortcut**: `Meta+M` toggles the selected group instantly, no
   click needed (registered declaratively via
   `~/.local/share/applications/monitor-switcher-toggle.desktop`'s
@@ -37,9 +28,16 @@ those screens.
 
 Which monitors belong to the group — and which one is the primary monitor
 (marked with ★ in the tray menu, under "Primary monitor") — is saved in
-`~/.config/monitor-switcher/config.json`. KWin tends to reshuffle output
+`~/.config/monitor-switcher/config.json` and can be changed entirely from
+the tray menu; no need to touch the code. KWin tends to reshuffle output
 priorities when outputs are disabled/re-enabled, so the saved primary is
 re-applied on every toggle to keep it from drifting.
+
+The `DEFAULT_SELECTED` / `DEFAULT_PRIMARY` constants at the top of
+`monitor_switcher.py` only seed the very first run (using whatever
+connector names `kscreen-doctor -o` reports on your machine, e.g.
+`HDMI-A-1`, `DP-1`); after that, everything is driven by the config file
+and the tray menu.
 
 ## Run manually / debug
 
