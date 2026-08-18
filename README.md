@@ -46,6 +46,41 @@ connector names `kscreen-doctor -o` reports on your machine, e.g.
 `HDMI-A-1`, `DP-1`); after that, everything is driven by the config file
 and the tray menu.
 
+### Switching the monitor's physical input too (optional)
+
+If a monitor is shared with another machine over a second cable (e.g. a
+laptop on HDMI, this PC on DisplayPort), `kscreen-doctor` can only turn
+this PC's *output* off — it can't touch which cable the monitor is
+actually displaying. That part is a separate protocol, DDC/CI (the same
+channel KDE uses for hardware brightness control), and needs
+[`ddcutil`](https://www.ddcutil.com/) installed (`sudo apt install
+ddcutil`).
+
+When a monitor's connector name is listed in `INPUT_SOURCE_CODES` at the
+top of `monitor_switcher.py`, toggling it off also flips its input to the
+other machine's cable, and toggling it back on claims it back — so
+turning the group off both stops this PC's mouse/focus from reaching it
+*and* hands the screen to the other machine, and turning it back on
+brings both back together.
+
+The codes are painfully monitor-specific: **don't trust `ddcutil
+capabilities`** — on at least one panel here its advertised codes (the
+standard MCCS `0x0f`/`0x11`/`0x12`) did nothing, while the real,
+manufacturer-specific codes it actually responds to (`0x07`/`0x05`, found
+by trial and error) worked fine. To find yours:
+
+```bash
+ddcutil detect                    # lists each monitor's /dev/i2c-N bus
+ddcutil --bus N getvcp 60         # reads the *current* input's real code
+                                   # (switch inputs by hand between reads
+                                   # to map out which code is which)
+ddcutil --bus N setvcp 60 0xXX    # try writing a candidate code
+```
+
+This is best-effort by design: if `ddcutil` isn't installed, a monitor
+has no entry in `INPUT_SOURCE_CODES`, or a DDC/CI write fails, the KWin
+enable/disable still happens normally — nothing here can block that.
+
 ## Run manually / debug
 
 ```bash
@@ -60,6 +95,8 @@ python3 monitor_switcher.py --toggle   # toggle the saved group and exit
 - `PyQt6`
 - `edid-decode` (optional, only used to resolve the monitor's commercial
   name; falls back to the connector name otherwise)
+- `ddcutil` (optional, only needed for the physical input-switching
+  feature described below)
 
 ## Install
 

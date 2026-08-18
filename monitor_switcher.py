@@ -36,6 +36,20 @@ DEFAULT_SELECTED = ["DP-1", "DP-2"]
 # so this gets re-applied on every toggle. Changeable from the tray menu.
 DEFAULT_PRIMARY = "DP-1"
 
+# Manufacturer-specific DDC/CI "Input Source" (VCP feature 0x60) codes for
+# the monitors that also need their physical video input switched when
+# toggled -- e.g. a monitor shared with a laptop over a second HDMI cable.
+# These are NOT the generic MCCS values `ddcutil capabilities` advertises;
+# on cheap/whitelabel panels that table is often just wrong. The Hailstorm
+# entry below was found by trial and error over its real capabilities
+# table (0x0f/0x11 did nothing; 0x07/0x05 do). Switching input is treated
+# as best-effort everywhere: if ddcutil is missing, a monitor has no entry
+# here, or the DDC/CI write fails, the KWin enable/disable still happens.
+INPUT_SOURCE_CODES = {
+    "DP-1": {"displayport": "0x07", "hdmi": "0x05"},  # Hailstorm -- confirmed by testing
+    "DP-2": {"displayport": "0x0f", "hdmi": "0x11"},  # LF24T450F -- from its own capabilities, untested live
+}
+
 
 # --------------------------------------------------------------------------
 # kscreen-doctor helpers
@@ -137,6 +151,56 @@ def restore_positions(outputs: list[dict]) -> list[str]:
 
 
 # --------------------------------------------------------------------------
+# DDC/CI (physical monitor input switching -- separate from KWin/kscreen)
+# --------------------------------------------------------------------------
+
+def get_ddc_bus(output_name: str) -> int | None:
+    """Resolve the /dev/i2c-N bus ddcutil uses for a kscreen output name
+    (e.g. 'DP-1'), by matching the DRM connector `ddcutil detect` reports.
+    Bus numbers can change across reboots/hotplugs, so this is re-resolved
+    every time rather than cached to disk."""
+    try:
+        result = subprocess.run(
+            ["ddcutil", "detect", "--brief"], capture_output=True, text=True, timeout=10
+        )
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return None
+
+    bus = None
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        m_bus = re.match(r"I2C bus:\s*/dev/i2c-(\d+)", line)
+        if m_bus:
+            bus = int(m_bus.group(1))
+            continue
+        m_conn = re.match(r"DRM connector:\s*card\d+-(.+)$", line)
+        if m_conn and bus is not None and m_conn.group(1) == output_name:
+            return bus
+    return None
+
+
+def switch_input(output_name: str, source: str) -> bool:
+    """Best-effort: switch a monitor's active video input via DDC/CI.
+    `source` is 'displayport' or 'hdmi'. Returns False (never raises) if
+    ddcutil isn't installed, the monitor has no known codes, or its DDC/CI
+    bus can't be found -- this must never block the KWin enable/disable."""
+    codes = INPUT_SOURCE_CODES.get(output_name)
+    if not codes or source not in codes:
+        return False
+    bus = get_ddc_bus(output_name)
+    if bus is None:
+        return False
+    try:
+        subprocess.run(
+            ["ddcutil", "--bus", str(bus), "setvcp", "60", codes[source]],
+            capture_output=True, timeout=10,
+        )
+        return True
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return False
+
+
+# --------------------------------------------------------------------------
 # Config
 # --------------------------------------------------------------------------
 
@@ -218,6 +282,11 @@ def toggle_group(names: list[str]) -> tuple[bool, str]:
             save_layout({o["name"]: o["pos"] for o in outputs})
         # Close the gap the disabled output(s) would otherwise leave behind.
         commands += compact_positions(remaining_on)
+        # DDC/CI needs this PC's link to still be up to reach the monitor,
+        # so hand it over to the other machine's cable *before* disabling
+        # our own output -- doing it after leaves the DDC/CI channel dead.
+        for n in present:
+            switch_input(n, "hdmi")
     else:
         # Put everyone (the ones coming back and the ones that were
         # shifted to compact the gap) back where they started.
@@ -228,6 +297,12 @@ def toggle_group(names: list[str]) -> tuple[bool, str]:
     # priorities when outputs are disabled/enabled.
     commands += priority_commands(outputs, load_primary())
     ok = apply_kscreen(commands)
+
+    if action == "enable" and ok:
+        # Our link is confirmed back up now -- safe to claim the input.
+        for n in present:
+            switch_input(n, "displayport")
+
     verb = "turned off" if action == "disable" else "turned on"
     names_str = ", ".join(friendly_name(n) for n in present)
     if ok:
