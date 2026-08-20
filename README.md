@@ -81,6 +81,19 @@ This is best-effort by design: if `ddcutil` isn't installed, a monitor
 has no entry in `INPUT_SOURCE_CODES`, or a DDC/CI write fails, the KWin
 enable/disable still happens normally — nothing here can block that.
 
+**Watch out for one-way monitors.** Some panels power down their
+DisplayPort DDC/CI responder entirely once DisplayPort stops being the
+*selected* input — HDMI's simpler DDC pins tend to survive this, DP's AUX
+channel often doesn't. That makes switching *away* from DisplayPort work
+fine, but switching *back* impossible: by the time you'd send that
+command, the channel driving it is already dead, and no retry, link
+retrain, alternate `/dev/i2c-*` bus, or USB fallback brings it back — only
+the monitor's own physical button does. Confirm both directions actually
+round-trip (switch away, then back, with a real signal on the other
+input) before adding a monitor to `INPUT_SOURCE_CODES` — a one-way entry
+will silently strand that monitor on the other machine's input every
+time you turn it back on.
+
 ## Run manually / debug
 
 ```bash

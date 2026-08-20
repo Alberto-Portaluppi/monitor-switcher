@@ -45,9 +45,15 @@ DEFAULT_PRIMARY = "DP-1"
 # table (0x0f/0x11 did nothing; 0x07/0x05 do). Switching input is treated
 # as best-effort everywhere: if ddcutil is missing, a monitor has no entry
 # here, or the DDC/CI write fails, the KWin enable/disable still happens.
+#
+# DP-2 (LF24T450F) is deliberately NOT listed here: its DisplayPort DDC/CI
+# channel only responds while DisplayPort is its actively selected input --
+# the moment it's switched to HDMI, that channel goes dead (confirmed with
+# I/O errors across every bus/retrain angle tried), so there's no way to
+# switch it back to DisplayPort from software once it's on HDMI. Adding it
+# here would silently strand it on HDMI every time.
 INPUT_SOURCE_CODES = {
-    "DP-1": {"displayport": "0x07", "hdmi": "0x05"},  # Hailstorm -- confirmed by testing
-    "DP-2": {"displayport": "0x0f", "hdmi": "0x11"},  # LF24T450F -- from its own capabilities, untested live
+    "DP-1": {"displayport": "0x07", "hdmi": "0x05"},  # Hailstorm -- confirmed working both ways
 }
 
 
