@@ -21,6 +21,7 @@ import json
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 CONFIG_DIR = Path.home() / ".config" / "monitor-switcher"
@@ -207,6 +208,46 @@ def switch_input(output_name: str, source: str) -> bool:
 
 
 # --------------------------------------------------------------------------
+# Deskflow (KVM) -- doesn't notice this machine's screen geometry changed
+# unless it's restarted after a toggle
+# --------------------------------------------------------------------------
+
+def restart_deskflow() -> bool:
+    """Best-effort: if Deskflow is running, restart it so it re-reads this
+    machine's screen geometry -- it doesn't pick up display changes live,
+    so its screen-edge mapping goes stale after a monitor toggle otherwise.
+    No-ops if Deskflow isn't installed or wasn't already running; never
+    blocks the monitor toggle itself on failure."""
+    try:
+        was_running = subprocess.run(
+            ["pgrep", "-x", "deskflow"], capture_output=True
+        ).returncode == 0
+    except FileNotFoundError:
+        return False
+    if not was_running:
+        return False
+
+    subprocess.run(["pkill", "-x", "deskflow"], capture_output=True)
+    subprocess.run(["pkill", "-x", "deskflow-core"], capture_output=True)
+    for _ in range(20):  # poll up to ~2s for a clean exit before relaunching
+        still_running = subprocess.run(
+            ["pgrep", "-x", "deskflow"], capture_output=True
+        ).returncode == 0
+        if not still_running:
+            break
+        time.sleep(0.1)
+
+    try:
+        subprocess.Popen(
+            ["deskflow"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        return True
+    except (FileNotFoundError, OSError):
+        return False
+
+
+# --------------------------------------------------------------------------
 # Config
 # --------------------------------------------------------------------------
 
@@ -308,6 +349,11 @@ def toggle_group(names: list[str]) -> tuple[bool, str]:
         # Our link is confirmed back up now -- safe to claim the input.
         for n in present:
             switch_input(n, "displayport")
+
+    if ok:
+        # The screen geometry just changed under it -- Deskflow won't
+        # notice on its own.
+        restart_deskflow()
 
     verb = "turned off" if action == "disable" else "turned on"
     names_str = ", ".join(friendly_name(n) for n in present)

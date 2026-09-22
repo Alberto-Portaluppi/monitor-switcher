@@ -94,6 +94,20 @@ input) before adding a monitor to `INPUT_SOURCE_CODES` — a one-way entry
 will silently strand that monitor on the other machine's input every
 time you turn it back on.
 
+### Restarting Deskflow (KVM) on toggle
+
+If [Deskflow](https://github.com/deskflow/deskflow) (a keyboard/mouse
+sharing tool, Barrier/Synergy's successor) is running, every successful
+toggle also restarts it. Deskflow reads this machine's screen geometry
+once at startup to build its screen-edge mapping and doesn't notice when
+`kscreen-doctor` changes it later, so without this its edge-switching goes
+stale (or breaks outright) the moment a monitor toggle changes the total
+screen bounds. `restart_deskflow()` in `monitor_switcher.py` handles this:
+it's a no-op if Deskflow isn't installed or wasn't already running, kills
+both the `deskflow` and `deskflow-core` processes, waits (up to ~2s) for
+them to actually exit, and relaunches `deskflow` fresh. It never blocks or
+fails the monitor toggle itself.
+
 ## Run manually / debug
 
 ```bash
